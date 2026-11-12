@@ -47,3 +47,17 @@ class DocumentDetailSerializer(DocumentSerializer):
     class Meta(DocumentSerializer.Meta):
         fields = DocumentSerializer.Meta.fields + ["chunks"]
         extra_kwargs = {}
+
+
+class AskSerializer(serializers.Serializer):
+    """Input for POST /api/documents/<id>/ask/"""
+
+    question = serializers.CharField(min_length=3, max_length=1000)
+
+
+class CitationSerializer(serializers.ModelSerializer):
+    chunk_id = serializers.IntegerField(source="id")
+
+    class Meta:
+        model = Chunk
+        fields = ["chunk_id", "index", "text"]

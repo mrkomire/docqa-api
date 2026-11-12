@@ -131,3 +131,76 @@ class UploadQueuesJobTests(APITestCase):
         self.assertEqual(res.status_code, 202)
         self.assertEqual(res.data["status"], "pending")
         mock_delay.assert_called_once_with(doc.id)
+
+
+# ---------- Step 4: Q&A with citations ----------
+from .models import Chunk, Question
+from .services.retrieval import top_chunks
+
+
+class RetrievalTests(TestCase):
+    def setUp(self):
+        doc = Document.objects.create(matter=Matter.objects.create(name="M"), title="T", text="x" * 30)
+        texts = [
+            "This Agreement is between Acme Ltd and Beta LLP.",
+            "Either party may terminate on 90 days written notice.",
+            "The Supplier shall indemnify the Customer against third party claims.",
+        ]
+        self.chunks = [Chunk.objects.create(document=doc, index=i, text=t) for i, t in enumerate(texts)]
+
+    def test_finds_the_right_clause(self):
+        best = top_chunks("What is the notice period to terminate?", self.chunks, k=1)
+        self.assertEqual(best[0].index, 1)
+
+    def test_rare_word_wins(self):
+        best = top_chunks("Who gives the indemnity? indemnify", self.chunks, k=1)
+        self.assertEqual(best[0].index, 2)
+
+    def test_no_match_returns_empty(self):
+        self.assertEqual(top_chunks("cryptocurrency", self.chunks), [])
+
+
+class AskEndpointTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user("lawyer", password="pass12345")
+        self.client.force_authenticate(self.user)
+        matter = Matter.objects.create(name="Falcon")
+        self.doc = Document.objects.create(matter=matter, title="MSA", text="x" * 30, status="done")
+        Chunk.objects.create(document=self.doc, index=0, text="This Agreement is between Acme Ltd and Beta LLP.")
+        Chunk.objects.create(document=self.doc, index=1, text="Either party may terminate on 90 days written notice.")
+
+    @patch("documents.services.qa.answer", return_value="Either party can end it with 90 days notice [1].")
+    def test_answer_with_valid_citation(self, _):
+        res = self.client.post(f"/api/documents/{self.doc.id}/ask/",
+                               {"question": "What is the termination notice?"}, format="json")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual([c["index"] for c in res.data["citations"]], [1])
+        self.assertEqual(res.data["invalid_citations"], [])
+        q = Question.objects.get()
+        self.assertEqual(q.asked_by, self.user)  # audit trail saved
+        self.assertFalse(q.has_invalid_citations)
+
+    @patch("documents.services.qa.answer", return_value="Notice is 90 days [1] and fees are due [7].")
+    def test_made_up_citation_is_flagged(self, _):
+        res = self.client.post(f"/api/documents/{self.doc.id}/ask/",
+                               {"question": "What is the termination notice?"}, format="json")
+        self.assertEqual(res.data["invalid_citations"], [7])
+        self.assertTrue(Question.objects.get().has_invalid_citations)
+
+    def test_not_ready_returns_409(self):
+        self.doc.status = "processing"
+        self.doc.save()
+        res = self.client.post(f"/api/documents/{self.doc.id}/ask/", {"question": "Anything?"}, format="json")
+        self.assertEqual(res.status_code, 409)
+
+    def test_question_is_validated(self):
+        res = self.client.post(f"/api/documents/{self.doc.id}/ask/", {"question": "x"}, format="json")
+        self.assertEqual(res.status_code, 400)
+
+
+class StemmingTests(TestCase):
+    def test_word_forms_match(self):
+        from .services.retrieval import tokenize
+        self.assertEqual(tokenize("governs"), tokenize("governed"))
+        self.assertEqual(tokenize("indemnifies"), tokenize("indemnify"))
+        self.assertEqual(tokenize("claims"), tokenize("claim"))

@@ -44,3 +44,38 @@ def summarise(title: str, chunks: list[str]) -> str:
     if response.stop_reason == "refusal":
         raise RuntimeError("The model declined to summarise this document.")
     return "".join(b.text for b in response.content if b.type == "text").strip()
+
+
+ANSWER_SYSTEM = (
+    "You answer questions about a legal document for lawyers. Use ONLY the numbered chunks "
+    "provided. Cite the chunk number after each claim, like [3]. If the chunks do not contain "
+    "the answer, reply exactly: \"The document does not say.\" Never guess or use outside knowledge."
+)
+
+
+def answer(question: str, chunks: list) -> str:
+    """chunks: Chunk objects. They are numbered with their real index so citations map back."""
+    if not chunks:
+        return "The document does not say."
+
+    if _provider() == "fake":
+        from .retrieval import tokenize  # offline: return the best-matching line, cited
+
+        q = set(tokenize(question))
+        best = chunks[0]
+        lines = [line for line in best.text.split("\n") if line.strip()]
+        sentence = max(lines, key=lambda line: len(q & set(tokenize(line))))
+        return f"{sentence[:300]} [{best.index}]"
+
+    context = "\n\n".join(f"[{c.index}]\n{c.text}" for c in chunks)
+    client = anthropic.Anthropic()
+    response = client.messages.create(
+        model=os.environ.get("LLM_MODEL", "claude-opus-5-5"),
+        max_tokens=4000,
+        output_config={"effort": "low"},
+        system=ANSWER_SYSTEM,
+        messages=[{"role": "user", "content": f"Chunks:\n{context}\n\nQuestion: {question}"}],
+    )
+    if response.stop_reason == "refusal":
+        raise RuntimeError("The model declined to answer this question.")
+    return "".join(b.text for b in response.content if b.type == "text").strip()

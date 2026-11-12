@@ -52,3 +52,21 @@ class Chunk(models.Model):
 
     def __str__(self):
         return f"{self.document.title} #{self.index}"
+
+
+class Question(models.Model):
+    """Audit trail: who asked what, what the AI answered, and which chunks it cited."""
+
+    document = models.ForeignKey(Document, on_delete=models.CASCADE, related_name="questions")
+    asked_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True)
+    question = models.TextField()
+    answer = models.TextField()
+    cited_chunks = models.ManyToManyField(Chunk, blank=True, related_name="cited_in")
+    has_invalid_citations = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return self.question[:60]

@@ -4,8 +4,15 @@ from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
-from .models import Document, Matter
-from .serializers import DocumentDetailSerializer, DocumentSerializer, MatterSerializer
+from .models import Document, Matter, Question
+from .serializers import (
+    AskSerializer,
+    CitationSerializer,
+    DocumentDetailSerializer,
+    DocumentSerializer,
+    MatterSerializer,
+)
+from .services.qa import ask_document
 from .tasks import process_document
 
 
@@ -51,3 +58,35 @@ class DocumentViewSet(viewsets.ModelViewSet):
         doc.save(update_fields=["status", "updated_at"])
         transaction.on_commit(lambda: process_document.delay(doc.id))
         return Response({"id": doc.id, "status": doc.status}, status=status.HTTP_202_ACCEPTED)
+
+    @action(detail=True, methods=["post"])
+    def ask(self, request, pk=None):
+        """POST /api/documents/5/ask/  {"question": "What is the notice period?"}"""
+        doc = self.get_object()
+        if doc.status != Document.Status.DONE:
+            return Response(
+                {"detail": f"Document is not ready yet (status: {doc.status})."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        payload = AskSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        question_text = payload.validated_data["question"]
+
+        result = ask_document(doc, question_text)
+
+        record = Question.objects.create(
+            document=doc,
+            asked_by=request.user,
+            question=question_text,
+            answer=result["answer"],
+            has_invalid_citations=bool(result["invalid_citations"]),
+        )
+        record.cited_chunks.set(result["citations"])
+
+        return Response({
+            "question_id": record.id,
+            "answer": result["answer"],
+            "citations": CitationSerializer(result["citations"], many=True).data,
+            "invalid_citations": result["invalid_citations"],
+        })
